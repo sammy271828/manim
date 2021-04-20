@@ -14,7 +14,8 @@ from manimlib.utils.iterables import listify
 from manimlib.utils.space_ops import normalize_along_axis
 
 
-class MySurface(Mobject):
+#DRAWS A SURFACE GIVEN BY AN IMPLICIT EQUATION BY CONSTRUCTING A TRIANGULATION
+class ImplicitSurface(Mobject):
     CONFIG = {
         # Resolution counts number of points sampled, which for
         # each coordinate is one more than the the number of
