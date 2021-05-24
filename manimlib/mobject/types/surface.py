@@ -325,15 +325,8 @@ class KleinCubic(Mobject):
         v_list = []
         tri_indices = []
         index_table = {}
-
-
-        #FIND FIRST POINT ON BOUNDARY POLYGON
-        point = np.array([2, 2, 2])
-        newton_func = lambda t: func(*(point + t * point))
-        T = optimize.newton(newton_func, 0)
-        start = point + T * point
-
-
+        
+        
         #CALCULATING THE TWO CUTTING PLANES
         z_dir = np.array([1, 1, 1])
         x_dir = np.array([-1, -1, 2])
@@ -353,6 +346,12 @@ class KleinCubic(Mobject):
         plane_normal_two = np.array([1,-1,0])
         plane_normal_two = plane_normal_two/np.linalg.norm(plane_normal_two)
 
+
+        #FIND FIRST POINT ON BOUNDARY POLYGON
+        point = np.array([2, 2, 2])
+        newton_func = lambda t: func(*(point + t * point))
+        T = optimize.newton(newton_func, 0)
+        start = point + T * point
 
         #TRAVERSE FIRST PLANE CURVE UNTIL OUTER SPHERE IS REACHED
         current = start
@@ -712,7 +711,6 @@ class KleinCubic(Mobject):
         tri_indices = np.asarray(tri_indices)
         point_lists = point_list + u_list + v_list
         point_lists = np.asarray(point_lists)
-        print(tri_indices)
 
         self.set_points(point_lists)
         self.triangle_indices = tri_indices
