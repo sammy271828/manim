@@ -1,26 +1,5 @@
-import numpy as np
-from scipy import optimize
-from queue import Queue
-from numpy import heaviside
-
-import moderngl
-
-from manimlib.constants import *
-from manimlib.mobject.mobject import Mobject
-from manimlib.utils.bezier import integer_interpolate
-from manimlib.utils.bezier import interpolate
-from manimlib.utils.images import get_full_raster_image_path
-from manimlib.utils.iterables import listify
-from manimlib.utils.space_ops import normalize_along_axis
-
-
-#DRAWS A SURFACE GIVEN BY AN IMPLICIT EQUATION BY CONSTRUCTING A TRIANGULATION
-class ImplicitSurface(Mobject):
+class KleinCubic(Mobject):
     CONFIG = {
-        # Resolution counts number of points sampled, which for
-        # each coordinate is one more than the the number of
-        # rows/columns of approximating squares
-        "resolution": (101, 101),
         "color": RED,
         "opacity": 1.0,
         "gloss": 0.3,
@@ -42,266 +21,484 @@ class ImplicitSurface(Mobject):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        print(len(self.get_triangle_indices()), len(self.get_points()))
 
     def init_points(self):
-        func = lambda x, y, z: 81 * (x ** 3 + y ** 3 + z ** 3) - 189 * (x ** 2 * y + x ** 2 * z + x * y ** 2 + x * z ** 2 + y ** 2 * z + y * z ** 2) + 54 * x * y * z + 126 * (x * y + x * z + y * z) - 9 * (x ** 2 + y ** 2 + z ** 2) - 9 * (x + y + z) + 1
-        partial_x = lambda x, y, z: 81 * (3 * x ** 2) - 189 * (2 * x * y + 2 * x * z + y ** 2 + z ** 2) + 54 * y * z + 126 * (y + z) - 9 * (2 * x) - 9
-        partial_y = lambda x, y, z: partial_x(y, x, z)
-        partial_z = lambda x, y, z: partial_x(z, x, y)
 
-        a = 1 / 7
+        #SCALING PARAMETER
+        a = 3/14
 
-        epsilon = 1e-5
-        print(epsilon)
+        # STEP SIZE
+        resolution = 0.15
 
-        afunc = lambda x, y, z: func(a * x, a * y, a * z)
+        #NUMBER OF STEPS TAKEN
+        steps = 2700
+        epsilon = self.epsilon
 
-        points = []
-        tri_indices = []
+        #DEFINING FUNCTION FOR THE KLEIN CUBIC
+        a_3=81
+        a_21 = -189
+
+        afunc = lambda x, y, z: a_3 * (x ** 3 + y ** 3 + z ** 3) + a_21 * (x ** 2 * y + x ** 2 * z + x * y ** 2 + x * z ** 2 + y ** 2 * z + y * z ** 2) + 54 * x * y * z + 126 * (x * y + x * z + y * z) - 9 * (x ** 2 + y ** 2 + z ** 2) - 9 * (x + y + z) + 1
+        apartial_x = lambda x, y, z: a_3 * (3 * x ** 2) + a_21 * (2 * x * y + 2 * x * z + y ** 2 + z ** 2) + 54 * y * z + 126 * (y + z) - 9 * (2 * x) - 9
+        apartial_y = lambda x, y, z: apartial_x(y, x, z)
+        apartial_z = lambda x, y, z: apartial_x(z, x, y)
+
+        #SCALED VERSION
+        func = lambda x, y, z: afunc(a * x, a * y, a * z)
+        partial_x = lambda x, y, z: a * apartial_x(a * x, a * y, a * z)
+        partial_y = lambda x, y, z: a * apartial_y(a * x, a * y, a * z)
+        partial_z = lambda x, y, z: a * apartial_z(a * x, a * y, a * z)
+
+        #DEFINING FUNCTION FOR THE SPHERE
+        sphere = lambda x,y,z: x**2 + y**2 + z**2 - 36
+        sphere_dx = lambda x,y,z: 2*x
+        sphere_dy = lambda x,y,z: sphere_dx(y,x,z)
+        sphere_dz = lambda x,y,z: sphere_dx(z,x,y)
+
+        #AUXILIARY FUNCTION TO ENFORCE VANISHING OF BOTH CUBIC AND SPHERE EXPRESSIONS
+        f = lambda x,y,z: (func(x,y,z))**2 + (sphere(x,y,z))**2
+        f_x = lambda x,y,z: 2*(func(x,y,z))*partial_x(x,y,z) + 2*sphere(x,y,z)*sphere_dx(x,y,z)
+        f_y = lambda x,y,z: f_x(y,x,z)
+        f_z = lambda x,y,z: f_x(z,x,y)
+
+        #FUNCTION FOR OPTIMIZING A GIVEN INITIAL GUESS USING NEWTON'S METHOD
+        def get_point_on_surface(next, func = func, partials = [partial_x,partial_y,partial_z]):
+
+            temp = ORIGIN
+
+            while np.linalg.norm(next-temp) > 0.000001:
+                temp=next
+                normal = np.array([partials[0](*temp), partials[1](*temp), partials[2](*temp)])
+                normal_length = np.linalg.norm(normal)
+
+                #UPDATE
+                next = temp - func(*temp)/(normal_length**2) * normal
+
+            return next
+
+        # FINDS ANGLE BETWEEN NEIGHBORING VECTORS AFTER PROJECTING TO TANGENT PLANE
+        def angle(current):
+            prev = current.prev.get_data()
+            next = current.next.get_data()
+            curr = current.get_data()
+
+            vectors = [prev - curr, next - curr]
+
+            # PROJECT VECTORS ONTO THE TANGENT PLANE AT THE CURRENT POINT
+            normal = np.array([partial_x(*curr), partial_y(*curr), partial_z(*curr)])
+            normal /= np.linalg.norm(normal)
+
+            vectors[0] = vectors[0] - np.dot(vectors[0], normal) * normal
+            vectors[1] = vectors[1] - np.dot(vectors[1], normal) * normal
+
+            vectors[0] /= np.linalg.norm(vectors[0])
+            vectors[1] /= np.linalg.norm(vectors[1])
+
+            return np.dot(vectors[0], vectors[1])
+
+
+        #SPLIT OUTER BOUNDARY POLYGON INTO THREE PARTS TO BE COMPUTED SEPARATELY
+        plane_curve_one = []
+        plane_curve_two = []
+        boundary_curve = []
+
+        # TO HOLD THE THREE BOUNDARY CURVES
+        bd_polygon = []
+
+        #INNER BOUNDARY POLYGON
+        inner_curve = []
+
+        # FOR ORGANIZING THE POINTS AND TRIANGLES
         point_list = []
-
         u_list = []
         v_list = []
+        tri_indices = []
+        index_table = {}
+        
+        
+        #CALCULATING THE TWO CUTTING PLANES
+        z_dir = np.array([1, 1, 1])
+        x_dir = np.array([-1, -1, 2])
+        y_dir = np.cross(z_dir, x_dir)
 
-        x_max = 7
-        y_max = x_max
-        z_max = 5
+        z_dir = z_dir / np.linalg.norm(z_dir)
+        x_dir = x_dir / np.linalg.norm(x_dir)
+        y_dir = y_dir / np.linalg.norm(y_dir)
 
-        resolution = 6
+        m = rotation_matrix(angle=-PI / 3, axis=z_dir)
+        purp_dir = np.matmul(m, x_dir)
+        purp_dir /= np.linalg.norm(purp_dir)
 
-        ranges = np.array([x_max, y_max, z_max])
+        plane_normal = np.cross(z_dir, purp_dir)
+        plane_normal /= np.linalg.norm(plane_normal)
 
-        ranges *= resolution
-        std_basis = np.array([np.array([1, 0, 0]), np.array([0, 1, 0]), np.array([0, 0, 1])])
+        plane_normal_two = np.array([1,-1,0])
+        plane_normal_two = plane_normal_two/np.linalg.norm(plane_normal_two)
 
-        nudge = std_basis / resolution
 
-        point_grid = np.zeros(shape=(2 * ranges[0] + 1, 2 * ranges[1] + 1, 2 * ranges[2] + 1))
-        point_table = {}
-        point_indices = {}
+        #FIND FIRST POINT ON BOUNDARY POLYGON
+        point = np.array([2, 2, 2])
+        newton_func = lambda t: func(*(point + t * point))
+        T = optimize.newton(newton_func, 0)
+        start = point + T * point
 
-        flag = True
-        first_point = [0, 0, 0]
+        #TRAVERSE FIRST PLANE CURVE UNTIL OUTER SPHERE IS REACHED
+        current = start
 
-        v1 = np.array([1,0,0])
-        print(v1, "hi")
+        while np.linalg.norm(current) < 6:
 
-        # RETRIEVE POINTS OF MESH
-        for i in range(-ranges[0], ranges[0]):
-            for j in range(-ranges[1], ranges[1]):
-                for k in range(-ranges[2], ranges[2]):
+            plane_curve_one.append(current)
 
-                    # if i**2 + j**2 + (2*k)**2 > 200:
-                    #    continue
+            #COMPUTE NORMAL AND TANGENT VECTORS
+            normal = np.array([partial_x(*current), partial_y(*current), partial_z(*current)])
+            normal /= np.linalg.norm(normal)
 
-                    P = np.array([i / resolution, j / resolution, k / resolution])
+            tangent = np.cross(normal,plane_normal)
+            tangent /= np.linalg.norm(tangent)
+            tangent *= resolution
 
-                    if np.linalg.norm(P) > 6:
-                        continue
+            #VISUALIZING THE MARCHING ALGORITHM WITH NORMAL AND TANGENT VECTORS
+            begin = current
 
-                    Q = P + nudge[0]
-                    R = P + nudge[1]
-                    S = P + nudge[2]
+            #CALCULATE NEXT STEP
+            current = current + tangent
 
-                    fp = afunc(P[0], P[1], P[2])
-                    fq = afunc(Q[0], Q[1], Q[2])
-                    fr = afunc(R[0], R[1], R[2])
-                    fs = afunc(S[0], S[1], S[2])
+            next=current
+            temp=ORIGIN
 
-                    if fp * fq <= 0 or fp * fr <= 0 or fp * fs <= 0:
-                        point_grid[ranges[0] + i][ranges[1] + j][ranges[2] + k] = 1
-                        # point_table[(i,j,k)] = P
+            #CALCULATE POINT ON SURFACE USING NEWTON'S METHOD
+            current = get_point_on_surface(next)
 
-                        if fp * fq <= 0:
-                            fun = lambda x: afunc(x, P[1], P[2])
 
-                            X = optimize.newton(fun, P[0])
+        # FIRST POINT ON BOUNDARY CURVE LYING ON SPHERE VIA NEWTON'S METHOD
+        next=current
+        current = get_point_on_surface(next, func=f, partials = [f_x,f_y,f_z])
 
-                            T = np.array([X, P[1], P[2]])
-                            # dots.add(SmallDot(T))
+        #MARCH ALONG BOUNDARY CURVE
+        while np.dot(plane_normal_two,current) < 0:
+            boundary_curve.append(current)
 
-                        elif fp * fr <= 0:
-                            fun = lambda y: afunc(P[0], y, P[2])
+            # COMPUTE NORMAL AND TANGENT VECTORS
+            normal = np.array([partial_x(*current), partial_y(*current), partial_z(*current)])
+            normal /= np.linalg.norm(normal)
 
-                            Y = optimize.newton(fun, P[1])
+            sphere_normal = np.array([sphere_dx(*current), sphere_dy(*current), sphere_dz(*current)])
+            sphere_normal /= np.linalg.norm(sphere_normal)
 
-                            T = np.array([P[0], Y, P[2]])
-                            # dots.add(SmallDot(T))
+            tangent = np.cross(sphere_normal,normal)
+            tangent /= np.linalg.norm(tangent)
+            tangent *= resolution
 
-                        elif fp * fs <= 0:
-                            fun = lambda z: afunc(P[0], P[1], z)
+            # CALCULATE NEXT STEP
+            current = current + tangent
+            next = current
+            current = get_point_on_surface(next, func=f, partials = [f_x,f_y,f_z])
 
-                            Z = optimize.newton(fun, P[2])
 
-                            T = np.array([P[0], P[1], Z])
-                            # dots.add(SmallDot(T))
+        #ORTHOGONAL PROJECTION ONTO THE SECOND PLANE
+        current = np.dot(current,x_dir) * x_dir + np.dot(current,z_dir) * z_dir
 
-                        point_table[(i, j, k)] = T
+        #FIRST POINT ON SECOND PLANE CURVE VIA NEWTON'S METHOD
+        next = current
+        current = get_point_on_surface(next, func=f, partials=[f_x, f_y, f_z])
 
-                        point_indices[(i, j, k)] = len(points)
-                        points.append((i, j, k))
+        # MARCH ALONG SECOND PLANE CURVE
+        while np.dot(x_dir,current) > 0:
+            plane_curve_two.append(current)
 
-                        point_list.append(T)
+            # COMPUTE NORMAL AND TANGENT VECTORS
+            normal = np.array([partial_x(*current), partial_y(*current), partial_z(*current)])
+            normal /= np.linalg.norm(normal)
 
-                        gradient = np.array([partial_x(*T), partial_y(*T), partial_z(*T)])
+            tangent = np.cross(plane_normal_two,normal)
+            tangent /= np.linalg.norm(tangent)
+            tangent *= resolution
 
+            # CALCULATE NEXT STEP
+            current = current + tangent
+            next = current
+            current = get_point_on_surface(next)
 
-                        u_vec = np.cross(gradient, v1)
-                        v_vec = np.cross(gradient, u_vec)
 
-                        u_vec = u_vec / np.linalg.norm(u_vec)
-                        v_vec = v_vec / np.linalg.norm(v_vec)
+    #FIRST POINT ON INNER CURVE
+        #TODO: make this not hard-coded
+        first = np.array([0.16105883, 0.04729694, 0.66286412])
 
-                        u_vec *= epsilon
-                        v_vec *= epsilon
+        #PROJECT ONTO THE PLANE
+        print(np.dot(first, plane_normal_two))
+        first = first - np.dot(first,plane_normal_two)*plane_normal_two
 
-                        u_list.append(T + u_vec)
-                        v_list.append(T + v_vec)
+        #FIND FIRST POINT ON THE CURVE
+        next = first
+        current = get_point_on_surface(next)
+        first = current
 
-                        if flag:
-                            flag = False
-                            first_point = [i, j, k]
+        while len(inner_curve) < 3 or np.linalg.norm(current - first) > resolution:
+            inner_curve.append(current)
 
-        # print(len(point_table))
+            # COMPUTE NORMAL AND TANGENT VECTORS
+            normal = np.array([partial_x(*current), partial_y(*current), partial_z(*current)])
+            normal /= np.linalg.norm(normal)
 
-        # TODO: FIX THIS!!
-        # dummy search
-        if False:
-            for i in range(-ranges[0], ranges[0]):
-                for j in range(-ranges[1], ranges[1]):
-                    for k in range(-ranges[2], ranges[2]):
-                        if point_grid[ranges[0] + i][ranges[1] + j][ranges[2] + k] == 1:
-                            x = ranges[0] + i
-                            y = ranges[1] + j
-                            z = ranges[2] + k
+            tangent = np.cross(plane_normal_two, normal)
+            tangent /= np.linalg.norm(tangent)
+            tangent *= resolution
 
-                            coords = [x, y, z]
+            # CALCULATE NEXT STEP
+            current = current + tangent
 
-                            print(coords)
+            next = current
+            current = get_point_on_surface(next)
 
-                            start_point = point_table[(i, j, k)]
 
-                            for a in range(0, 3):
-                                if point_grid[x + delta(a, 0)][y + delta(a, 1)][z + delta(a, 2)] == 1:
-                                    end_point = point_table[(i + delta(a, 0), j + delta(a, 1), k + delta(a, 2))]
-                                    pass
+    #CALCULATE TRIANGLES
+        bd_polygon = plane_curve_one + boundary_curve + plane_curve_two
 
-        # BREADTH-FIRST SEARCH
-        if True:
-            print(first_point)
+        # PUT INNER POLYGON IN CLOCKWISE CIRCULAR LIST TO BE JOINED LATER
+        inner_size = len(inner_curve)
 
-            point_grid = np.pad(point_grid, (1, 0), mode='constant')
+        inner_head = Node(inner_curve[0])
+        current = Node(inner_curve[1])
 
-            x0 = ranges[0] + first_point[0] + 1
-            y0 = ranges[1] + first_point[1] + 1
-            z0 = ranges[2] + first_point[2] + 1
+        inner_head.next = current
+        current.prev = inner_head
 
-            print(point_grid[x0, y0, z0])
+        for i in range(2, inner_size):
+            next = Node(inner_curve[i])
+            next.prev = current
+            current.next = next
+            current = next
 
-            print([x0, y0, z0])
+        current.next = inner_head
+        inner_head.prev = current
 
-            visited = {}
-            num_points = len(point_table)
+        #PUT OUTER POLYGON IN CIRCULAR LIST TO MAKE UPDATING EASIER
+        head = Node(bd_polygon[0])
+        current = Node(bd_polygon[1])
 
-            coords = [x0, y0, z0]
+        head.next = current
+        current.prev = head
 
-            step = [-1, 0, 1]
+        for i in range(2,len(bd_polygon)):
+            next = Node(bd_polygon[i])
+            next.prev = current
+            current.next = next
+            current = next
 
-            steps = []
-            for a in range(-1, 2):
-                for b in range(-1, 2):
-                    for c in range(-1, 2):
-                        steps.append(a * std_basis[0] + b * std_basis[1] + c * std_basis[2])
+        current.next = head
+        head.prev = current
 
-            for s in steps:
-                print(s)
+        # COMPUTE MESH
+        current = head
+        inner_reached = False
 
-            next_points = Queue()
+        for i in range(steps):
+            #CHECK IF CLOSE TO INNER BOUNDARY CURVE AND JOIN POLYGONS TOGETHER
+            if not inner_reached and np.linalg.norm(current.get_data() - inner_head.get_data()) < resolution:
 
-            next_points.put(first_point)
+                # COMPUTE TRIANGLES
+                new_tri = [current.get_data(), inner_head.get_data(), inner_head.prev.get_data()]
+                for x in new_tri:
+                    if (x[0], x[1], x[2]) not in index_table:
+                        point_list.append(x)
+                        index_table[(x[0], x[1], x[2])] = len(point_list) - 1
+                    tri_indices.append(index_table[(x[0], x[1], x[2])])
 
-            triangles = 0
+                new_tri = [current.get_data(), current.next.get_data(),inner_head.prev.get_data()]
+                for x in new_tri:
+                    if (x[0], x[1], x[2]) not in index_table:
+                        point_list.append(x)
+                        index_table[(x[0], x[1], x[2])] = len(point_list) - 1
+                    tri_indices.append(index_table[(x[0], x[1], x[2])])
 
-            while not next_points.empty():
-                current = next_points.get()
+                temp = current.next
+                inner_temp = inner_head.prev
 
-                start_point = point_table[(current[0], current[1], current[2])]
+                current.next = inner_head
+                inner_head.prev = current
 
-                x0 = ranges[0] + current[0] + 1
-                y0 = ranges[1] + current[1] + 1
-                z0 = ranges[2] + current[2] + 1
+                inner_temp.next = temp
+                temp.prev = inner_temp
 
-                if point_grid[x0, y0, z0] == 0:
-                    continue
+                inner_reached = True
 
-                point_grid[x0, y0, z0] = 0
+            prev = current.prev.get_data()
+            next = current.next.get_data()
+            curr = current.get_data()
 
-                box = np.zeros((3, 3, 3))
+            vectors = [prev-curr, next-curr]
 
-                if True:
-                    for h in step:
-                        for k in step:
-                            for l in step:
-                                x = x0 + h
-                                y = y0 + k
-                                z = z0 + l
+            #PROJECT VECTORS ONTO THE TANGENT PLANE AT THE CURRENT POINT
+            normal = np.array([partial_x(*curr),partial_y(*curr),partial_z(*curr)])
+            normal /= np.linalg.norm(normal)
 
-                                if point_grid[x, y, z] == 1:
-                                    box[h, k, l] = 1
-                                    end_point = point_table[(x - ranges[0] - 1, y - ranges[1] - 1, z - ranges[2] - 1)]
-                                    next_points.put([x - ranges[0] - 1, y - ranges[1] - 1, z - ranges[2] - 1])
+            vectors[0] = vectors[0] - np.dot(vectors[0],normal) * normal
+            vectors[1] = vectors[1] - np.dot(vectors[1],normal) * normal
 
-                if True:
-                    p0 = start_point
-                    t0 = point_indices[(current[0], current[1], current[2])]
-                    neighbours = []
+            vectors[0] /= np.linalg.norm(vectors[0])
+            vectors[1] /= np.linalg.norm(vectors[1])
 
-                    for h in step:
-                        for k in step:
-                            for l in step:
-                                x1 = x0 + h
-                                y1 = y0 + k
-                                z1 = z0 + l
+            #IF ANGLE BETWEEN NEIGHBORING DIRECTIONS IS SMALL ENOUGH, JOIN THE POINTS
+            if angle(current) > 0:
+                current.prev.next = current.next
+                current.next.prev = current.prev
 
-                                if point_grid[x1, y1, z1] == 1:
-                                    neighbours.append(np.array([x1, y1, z1]))
-                                    box[h, k, l] = 1
+                #COMPUTE TRIANGLES
+                new_tri = [current.prev.get_data(),current.next.get_data(),current.get_data()]
 
-                                    p1 = point_table[(x1 - ranges[0] - 1, y1 - ranges[1] - 1, z1 - ranges[2] - 1)]
-                                    t1 = point_indices[(x1 - ranges[0] - 1, y1 - ranges[1] - 1, z1 - ranges[2] - 1)]
+                for x in new_tri:
+                    if (x[0],x[1],x[2]) not in index_table:
+                        point_list.append(x)
+                        index_table[(x[0],x[1],x[2])] = len(point_list) - 1
 
-                                    next_points.put([x1 - ranges[0] - 1, y1 - ranges[1] - 1, z1 - ranges[2] - 1])
+                    tri_indices.append(index_table[(x[0],x[1],x[2])])
 
-                                    for h in step:
-                                        for k in step:
-                                            for l in step:
-                                                x2 = x1 + h
-                                                y2 = y1 + k
-                                                z2 = z1 + l
+                current = current.next
 
-                                                if np.linalg.norm(np.array([x2, y2, z2]) - np.array([x0, y0, z0])) < 2:
-                                                    if point_grid[x2, y2, z2] == 1:
-                                                        p2 = point_table[(
-                                                        x2 - ranges[0] - 1, y2 - ranges[1] - 1, z2 - ranges[2] - 1)]
-                                                        t2 = point_indices[(
-                                                        x2 - ranges[0] - 1, y2 - ranges[1] - 1, z2 - ranges[2] - 1)]
+            elif angle(current.next) > 0:
+                new_tri = [current.next.next.get_data(), current.next.get_data(), current.get_data()]
 
-                                                        triangles += 1
+                current.next = current.next.next
+                current.next.prev = current
 
-                                                        tri_indices.append(t0)
-                                                        tri_indices.append(t1)
-                                                        tri_indices.append(t2)
+                # COMPUTE TRIANGLES
+                for x in new_tri:
+                    if (x[0], x[1], x[2]) not in index_table:
+                        point_list.append(x)
+                        index_table[(x[0], x[1], x[2])] = len(point_list) - 1
 
-                                                        # dots.add(Triangle3D(P0=p0,P1=p1,P2=p2, color = RED, resolution = (12,12)))
+                    tri_indices.append(index_table[(x[0], x[1], x[2])])
 
-            pass
+            #CALCULATE THE UPDATED CURRENT POINT
+            else:
+                m = rotation_matrix(angle=-PI / 3, axis=normal)
+                step = np.matmul(m,vectors[1])
+                step *= resolution
 
+                if np.dot(curr+step,plane_normal_two) > 0:
+                    m = rotation_matrix(angle=2*PI / 3, axis=normal)
+                    step = np.matmul(m,step)
+
+                curr = curr + step
+
+                point = curr
+                point = get_point_on_surface(point)
+                new_point = Node(data=point)
+
+                #UPDATE OUTER POLYGON
+                new_point.prev=current
+                current=current.next
+                new_point.prev.next=new_point
+                current.prev=new_point
+                new_point.next=current
+
+                #TRIANGLES
+                new_tri = [new_point.prev.get_data(),new_point.get_data(),current.get_data()]
+                for x in new_tri:
+                    if (x[0], x[1], x[2]) not in index_table:
+                        point_list.append(x)
+                        index_table[(x[0], x[1], x[2])] = len(point_list) - 1
+
+                    tri_indices.append(index_table[(x[0], x[1], x[2])])
+
+                new_tri = [new_point.prev.get_data(), new_point.prev.prev.get_data(), new_point.get_data()]
+                for x in new_tri:
+                    if (x[0], x[1], x[2]) not in index_table:
+                        point_list.append(x)
+                        index_table[(x[0], x[1], x[2])] = len(point_list) - 1
+
+                    tri_indices.append(index_table[(x[0], x[1], x[2])])
+
+                new_point.prev = new_point.prev.prev
+                new_point.prev.next = new_point
+
+
+        #COMPUTE U- AND V-LISTS
+        for p in point_list:
+            normal = (partial_x(*p), partial_y(*p), partial_z(*p))
+
+            u_vec = np.cross(normal,plane_normal_two)
+            v_vec = np.cross(normal,u_vec)
+
+            u_vec = epsilon*u_vec/np.linalg.norm(u_vec)
+            v_vec = epsilon*v_vec/np.linalg.norm(v_vec)
+
+            u_list.append(p+u_vec)
+            v_list.append(p+v_vec)
+
+        # GET REFLECTED POINTS
+        new_point_list = []
+        new_u_list = []
+        new_v_list = []
+        new_tri_indices = []
+
+        N = len(point_list)
+        for i in range(0, N):
+            p = point_list[i]
+            u = u_list[i]
+            v = v_list[i]
+
+            comp = np.dot(p, plane_normal_two)
+            new_p = p - 2 * comp * plane_normal_two
+
+            comp = np.dot(u, plane_normal_two)
+            new_u = u - 2 * comp * plane_normal_two
+
+            comp = np.dot(v, plane_normal_two)
+            new_v = v - 2 * comp * plane_normal_two
+
+            point_list.append(new_p)
+            u_list.append(new_u)
+            v_list.append(new_v)
+
+        for j in tri_indices:
+            new_tri_indices.append(j + N)
+
+        tri_indices = tri_indices + new_tri_indices
+
+        # GET ROTATED POINTS
+        new_tri_indices = []
+        N = len(point_list)
+        m = rotation_matrix(axis=z_dir, angle=TAU / 3)
+        m2 = rotation_matrix(axis=z_dir, angle=2*TAU / 3)
+
+        for i in range(0, N):
+            p = point_list[i]
+            u = u_list[i]
+            v = v_list[i]
+
+            new_p = np.matmul(m, p)
+            new_u = np.matmul(m, u)
+            new_v = np.matmul(m, v)
+
+            point_list.append(new_p)
+            u_list.append(new_u)
+            v_list.append(new_v)
+
+        for j in tri_indices:
+            new_tri_indices.append(j + N)
+
+        for i in range(0, N):
+            p = point_list[i]
+            u = u_list[i]
+            v = v_list[i]
+
+            new_p = np.matmul(m2, p)
+            new_u = np.matmul(m2, u)
+            new_v = np.matmul(m2, v)
+
+            point_list.append(new_p)
+            u_list.append(new_u)
+            v_list.append(new_v)
+
+        for j in tri_indices:
+            new_tri_indices.append(j + 2 * N)
+
+        tri_indices = tri_indices + new_tri_indices
+
+        # PUTTING IT ALL TOGETHER
         tri_indices = np.asarray(tri_indices)
-
-
         point_lists = point_list + u_list + v_list
-
         point_lists = np.asarray(point_lists)
 
         self.set_points(point_lists)
